@@ -1,5 +1,4 @@
 ---
-title: "CS971_Assignment_1"
 author: "Nidhin Pramod"
 date: "2023-02-22"
 output:
