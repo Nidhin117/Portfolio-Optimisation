@@ -1,30 +1,476 @@
 ---
-title: "Assignment_1_w"
+title: "CS971_Assignment_1"
 author: "Nidhin Pramod"
-date: "2023-02-23"
-output: word_document
+date: "2023-02-22"
+output:
+  html_document: default
+  word_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r include=FALSE}
+library(tidyverse)
+library(quantmod)
+library(GA)
+library(ggplot2)
 ```
 
-## Including Plots
+## Portfolio optimisation of manually selected assets using GA
+For the first part of the assignment, I have manually chosen 10 assets that are listed on NASDAQ. The emphasis while selecting the assets was to ensure that assets belonging to a specific sector do not dominate the portfolio. This is because, studies have shown that a diverse portfolio gives a better risk adjusted return.
+```{r }
+chosenAssets <- c ("AAPL","QCOM","GILD","AVGO","COST","PYPL","WBD","GOOGL","SBUX","VRTX")
+```
+For the training data the returns of each asset for the year 2019 have been selected.
+```{r results = "hide",message = FALSE,warning = FALSE}
+getSymbols(chosenAssets, src="yahoo", from="2019-01-01", to="2019-12-31")
+```
+I have then calculated the daily returns for each asset and then merged the result in a dataframe and added the column headers for each columns
+```{r}
+myRetData <- data.frame(merge(dailyReturn(AAPL),dailyReturn(QCOM),dailyReturn(GILD)
+             ,dailyReturn(AVGO),dailyReturn(COST),dailyReturn(PYPL)
+             ,dailyReturn(WBD),dailyReturn(GOOGL),dailyReturn(SBUX)                             ,dailyReturn(VRTX)))
 
-You can also embed plots, for example:
+colnames(myRetData) <- chosenAssets
+```
+In order to determine the optimal weights for a given portfolio, we need to calculate two things, the portfolio returns and the portfolio risk. In the below code snippet I have calculated the mean returns for the 10 assets and the covariance matrix, which has been annualized
+```{r}
+meanDailyReturns <-   apply(myRetData,2,mean)
+cov_assets  <- cov(myRetData) * 252
+```
+I observed that using default values of gareal_laCrossover (Local Arithmetic crossover) and gareal_raMutation (Uniform random mutation), has a significant impact on the constraints for weights, i.e the sum of weights should always be 1. In order to reduce the impact I have reset the mutation algorithm to Insertion mutation and crossover algorithm to a Single Point crossover and for selection I have set it to Roulette wheel selection.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+gaControl("real-valued" = list(selection = "gareal_rwSelection", #Roulette wheel Selection
+                               crossover = "gareal_spCrossover", #Single Point Crossover
+                               mutation= "gaperm_ismMutation"))  #Inversion Mutation
+```
+Next, I have created my own function to generate the initial population for GA.This function will generate 10 weights corresponding to 10 assets for each individual and the sum of weights is equal to 1. This way the initial population always has individuals which always satisfy the constraint
+```{r}
+popSize <- 300
+num_assets <- 10
+initial_population <- function(object) {
+  for (r in 1:popSize) {
+    chromosome <- runif(n = 10) #generate random chromosome (weights)
+    weight <-  chromosome/sum(chromosome) #weights = gene/sum(chromosome weights)
+    if (r == 1) {
+      initialPop <- rbind(weight)
+    }
+    else
+    {
+      initialPop <- rbind(initialPop,weight) #append each row to the matrix
+    }
+  }
+  return(initialPop) #return matrix of population to the GA function
+}
+```
+Next is a function to calulate penalty which will be applied to individuals which do not satisfy the weight constraint. Despite the previous changes, the constraints will eventually get violated due to the crossover operation.
+```{r}
+penalty_constraint = function(x) {
+  penalty=(sum(x)-1)**2
+  return(penalty)
+}
+```
+Next is the fitness function inside which I am calculating the annualized returns based on the weights of each individual chromosome. I am also calculating the portfolio risk which is determined using annualized covariance and the individual asset's weights. Finally the Sharpe Ratio is calculated which is a measure of risk adjusted return and is a popular method used to get balanced portfolio. When ever an individual violates constraints, I subtract a constant from Sharpe ratio, penalising the solution. This way GA rewards only those solutions that maintain constraint
+```{r}
+evalFunc <- function(weights,meanDailyRet,cov_assets) {
+  #print(weights)
+  
+  annualized_returns <- (sum(weights * meanDailyRet) + 1)^252 - 1 
+  risk <- sqrt(t(weights) %*% (cov_assets %*% weights))
+  sharpe_ratio = annualized_returns/risk
+  return(sharpe_ratio - 140 * penalty_constraint(weights))
+}
+```
+Finally we call the GA function and pass our own initial population. The crossover and mutation rates have been adjusted after multiple trials to get the best results.
+```{r}
+
+GA <- ga(type = "real-valued", fitness = function(x) {evalFunc(x, meanDailyReturns, cov_assets)}, 
+         population = initial_population,
+         popSize = popSize, maxiter = 2000,
+         pcrossover = 0.7,
+         lower = rep(0,10),
+         upper = rep(1,10),
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+optimal_weights <- as.vector(GA@solution)
+cat("Sum of weights ",sum(optimal_weights))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+After many iterations I have noticed that the Sharpe ratio fluctuates between 1.90 and 2.2.The optimal weights is always 1 when rounded off to 2 decimal places.
+```{r}
+calcReturns <- function(weights,meanDailyRet) {
+  annualized_returns <- (sum(weights * meanDailyRet) + 1)^252 - 1 
+  return(annualized_returns)
+}
+
+calcRisk <- function(weights,cov_asset) {
+  risk <- sqrt(t(weights) %*% (cov_asset %*% weights))
+  return(risk)
+}
+
+
+GA_returns <- calcReturns (optimal_weights,meanDailyReturns)
+GA_risk <-  calcRisk (optimal_weights,cov_assets)
+cat("GA returns is", GA_returns, "GA risk is", GA_risk, "GA Sharpe ratio is",GA@fitnessValue)
+pie(optimal_weights, labels = chosenAssets, main="Manually Generated Portfolio 2021")
+```
+Finally we can observe the portfolio allocation based on the weights determined using GA.
+
+
+## Comparison with evenly weighted and Randomly generated weights
+
+I have generated even weights for 10 assets and then calcuted the returns and risk for the portfolio. 
+```{r}
+even_weights <- rep(0.1,10)
+evenlyGen_returns <- calcReturns (even_weights,meanDailyReturns)
+evenlyGen_risk <-  calcRisk (even_weights,cov_assets)
+cat("Evenly generated portfolio returns is", evenlyGen_returns, "risk is", evenlyGen_risk, "Sharpe ratio is",evenlyGen_returns/evenlyGen_risk)
+```
+
+Next I have randomly generated weights 20 times and calculated their average return and risk.
+```{r}
+for (r in 1:20) {
+  chromosome <- runif(n = 10) #generate random chromosome (weights)
+  random_weight <-  chromosome/sum(chromosome) #weights = gene/sum(chromosome weights)
+  random_returns <- calcReturns (random_weight,meanDailyReturns)
+  random_risk <-  calcRisk (random_weight,cov_assets)
+  if (r==1){
+    random_ret_v <- c()
+    random_risk_v <- c()
+    random_ret_v <- random_returns
+    random_risk_v <- random_risk
+  }
+  else{
+  random_ret_v <- append(random_ret_v,random_returns) #append returns to a vector
+  random_risk_v <- append(random_risk_v,random_risk) #append risk to a vector
+  }
+}
+avg_random_returns <- mean(random_ret_v)
+avg_random_risk <- mean(random_risk_v)
+avg_sharpe_ratio <- avg_random_returns/avg_random_risk
+cat("Randomly generated portfolio returns is", avg_random_returns, "risk is", avg_random_risk, "Sharpe ratio is",avg_sharpe_ratio)
+
+```
+
+Finally we have a scatter plot which shows the difference in performance of each of these methods. We can clearly observe that with a return value of  GA clearly outperforms evenly weighted portfolio and Randomly generated portfolio.
+```{r}
+labels <- c("GA","Evenly Weighted","Random weights")
+colors <- c("red", "blue", "green")
+ggplot() +
+  geom_point(aes(x = c(GA_risk,evenlyGen_risk,avg_random_risk), 
+                 y = c(GA_returns,evenlyGen_returns,avg_random_returns),
+                 color = labels)) +
+  scale_color_manual(values = colors) +
+  labs(x = "Risk", y = "Returns",
+       title = "Risk vs. Return On Training Data of 2019") +
+  scale_y_continuous(limits = c(0.3, 0.6))
+```
+
+
+## Comparison of GA performance on Unseen Data
+For the testing data I have got the asset returns between the period 1-Mar-2020 to 31-Dec-2020. Then I have calculated the daily returns and stored it as a dataframe.
+After that I have calculated the mean daily returns for each of those assets. Finally have calculated the covariance matrix and annualized.
+```{r results = "hide"}
+getSymbols(chosenAssets, src="yahoo", from="2020-03-01", to="2020-12-31")
+myRetData2 <- data.frame(merge(dailyReturn(AAPL),dailyReturn(QCOM),dailyReturn(GILD)
+                        ,dailyReturn(AVGO),dailyReturn(COST),dailyReturn(PYPL)
+                        ,dailyReturn(WBD),dailyReturn(GOOGL),dailyReturn(SBUX)
+                        ,dailyReturn(VRTX)))
+colnames(myRetData2) <- chosenAssets
+meanDailyReturns2 <-   apply(myRetData2,2,mean)
+cov_assets2  <- cov(myRetData2) * 252
+```
+
+Next I use the optimal weights determined on training data using GA to calculate the returns, risk and Sharpe Ratio. 
+```{r}
+future_returns <- calcReturns (optimal_weights,meanDailyReturns2)
+future_risk <-  calcRisk (optimal_weights,cov_assets2)
+cat("Returns for future data using optimal weights is", future_returns, "risk is", future_risk, "Sharpe ratio is",future_returns/future_risk)
+
+```
+Subsequently I calculated the returns and risk on evenly weighted testing data and randomly generated portfolio weights. 
+```{r}
+#Evenly generated weights portfolio returns on testing set
+evenlyGen_fut_returns <- calcReturns (even_weights,meanDailyReturns2)
+evenlyGen_fut_risk <-  calcRisk (even_weights,cov_assets2)
+cat("Evenly generated portfolio returns is", evenlyGen_fut_returns, "risk is", evenlyGen_fut_risk, "Sharpe ratio is",evenlyGen_fut_returns/evenlyGen_fut_risk)
+
+#Randomly generated weights portfolio returns on testing set
+for (r in 1:5) {
+  chromosome <- runif(n = 10) #generate random chromosome (weights)
+  random_weight <-  chromosome/sum(chromosome) #weights = gene/sum(chromosome weights)
+  random_returns <- calcReturns (random_weight,meanDailyReturns2)
+  random_risk <-  calcRisk (random_weight,cov_assets2)
+  if (r==1){
+    random_ret_v_f <- c()
+    random_risk_v_f<- c()
+    random_ret_v_f <- random_returns
+    random_risk_v_f <- random_risk
+  }
+  else{
+    random_ret_v_f <- append(random_ret_v,random_returns) #append returns to a vector
+    random_risk_v_f <- append(random_risk_v,random_risk) #append risk to a vector
+  }
+}
+avg_random_returns_f <- mean(random_ret_v_f)
+avg_random_risk_f <- mean(random_risk_v_f)
+avg_sharpe_ratio_f <- avg_random_returns/avg_random_risk
+cat("Randomly generated portfolio returns is", avg_random_returns_f, "risk is", avg_random_risk_f, "Sharpe ratio is",avg_sharpe_ratio_f)
+```
+When we make a comparison of the performance  of these assets, we can infer that although GA generated portfolio weights performed better than evenly weighted portfolio, it has similar or sometimes lesser returns when compared to a randomly generated portfolio. This is because, the stocks which performed well until 2019 had a bad phase during the peak covid 19 period. Parameters such as Sharpe Ratio do not account for such drastic changes trigger global calamities.
+```{r}
+labels <- c("GA on Future Data","Evenly Weighted Future Data","Random weights on Future data")
+colors <- c("red", "blue", "green")
+ggplot() +
+  geom_point(aes(x = c(future_risk,evenlyGen_fut_risk,avg_random_risk_f), 
+                 y = c(future_returns,evenlyGen_fut_returns,avg_random_returns_f),
+                 color = labels)) +
+  scale_color_manual(values = colors) +
+  labs(x = "Risk", y = "Returns",
+       title = "Risk vs. Return On Testing Data of 2020") +
+  scale_x_continuous(limits = c(0.0, 0.6)) +
+  scale_y_continuous(limits = c(0.1, 0.8)) 
+
+```
+## Experimenting with differently balanced Portfolios
+
+
+Here I have tried to experiment with portfolio that lie on the extremes. To start with I have a fitness function that emphasises on maximizing the risk. This fitness function does not take into account the returns of the portfolio. I have also implemented a penalty function for any individual that does not satisfy the constraints
+```{r}
+riskFocused <- function(weights,cov_assets) {
+  risk <- sqrt(t(weights) %*% (cov_assets %*% weights))
+  return(risk - 100 * penalty_constraint(weights))
+}
+```
+
+Next I have a created a fitness function which tries to minimize the risks, this is called a minimum variance portfolio. In this case, the penalty adds a constant to the function so that the GA rewards only those individuals that satisfy the constraints and have a lower fitness value.
+```{r}
+LowRisk <- function(weights,cov_assets) {
+  #weights <-  chromosome/sum(chromosome)
+  risk <- sqrt(t(weights) %*% (cov_assets %*% weights))
+  return(risk + 100 * penalty_constraint(weights))
+}
+```
+
+Next I have fitness function that only tries to maximize the returns and does not take into to account the risk. This function is also having a penalty to penalize individuals that do not satisfy the constraints.
+```{r}
+maxReturns <- function(weights,meanDailyRet) {
+  annualized_returns <- (sum(weights * meanDailyRet) + 1)^252 - 1 
+  return(annualized_returns - 100 * penalty_constraint(weights))
+}
+```
+
+Finally I have another fitness function where the function gives different weights to returns and risk when trying to calculate the Sharpe Ratio. The returns is multiplied with a constant X and the risk is multiplied with (1-X). This gives more importance to returns and less importance to risk
+```{r}
+differently_weighted <- function(weights,meanDailyRet,cov_assets) {
+  priority_constant <- 0.7
+  annualized_returns <-  (sum(weights * meanDailyRet) + 1)^252 - 1 
+  annualized_returns <- annualized_returns * priority_constant
+  risk <-  sqrt(t(weights) %*% (cov_assets %*% weights))
+  risk <- risk * (1-priority_constant)
+  sharpe_ratio = annualized_returns/risk
+  return(sharpe_ratio - 100 * penalty_constraint(weights))
+}
+```
+
+Next we have the GA implementation for each of those functions. One key thing here is the third GA function has a "-ve" sign in the fitness function, this implies that we are trying to minimize the function.
+```{r}
+# GA for extremes
+#Case 1 : Portfolio that emphasises only on maximumizing returns
+GA <- ga(type = "real-valued", fitness = function(x) {maxReturns(x, meanDailyReturns)}, 
+         population = initial_population,
+         popSize = popSize, maxiter = 1000,
+         pcrossover = 0.7,
+         lower = rep(0,10),
+         upper = rep(1,10),
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+print(sum(GA@solution))
+wt_max_rt <- as.vector(GA@solution)
+max_rt_ret <- GA@fitnessValue
+max_rt_risk <- calcRisk (wt_max_rt,cov_assets)
+cat("Portfolio that only cares about Maximizing returns has returns", max_rt_ret)
+cat("Risk in this case is",max_rt_risk)
+
+pie(wt_max_rt, labels = chosenAssets, main="Returns focused Portfolio for 2019")
+
+#Case 2: Portfolio that emphasizes only on maximizing risk
+#Here the fitness function tries to maximize the risk
+GA <- ga(type = "real-valued", fitness = function(x) {riskFocused(x, cov_assets)}, 
+         population = initial_population,
+         popSize = popSize, maxiter = 1000,
+         pcrossover = 0.7,
+         lower = rep(0,10),
+         upper = rep(1,10),
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+print(sum(GA@solution))
+wt_max_rsk <- as.vector(GA@solution)
+max_rsk_rt <- calcReturns (wt_max_rt,meanDailyReturns)
+max_rsk_rsk <- GA@fitnessValue
+cat("Portfolio that only cares about Maximizing risk has risk of", max_rsk_rsk)
+cat("Returns in this case is",max_rsk_rt)
+pie(wt_max_rsk, labels = chosenAssets, main="Max Risk focued Portfolio 2019")
+
+#Case 3 Portfolio that emphasizes only on minimizing risk
+#Here the fitness function tries to minimize the risk
+
+GA <- ga(type = "real-valued", fitness = function(x) -{LowRisk(x, cov_assets)}, 
+         population = initial_population,
+         popSize = popSize, maxiter = 1000,
+         pcrossover = 0.7,
+         lower = rep(0,10),
+         upper = rep(1,10),
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+print(sum(GA@solution))
+wt_low_rsk <- as.vector(GA@solution)
+low_rsk_ret <- calcReturns (wt_low_rsk,meanDailyReturns)
+low_rsk_rsk <- GA@fitnessValue
+cat("Portfolio that only cares about Mimizing risk has risk of", low_rsk_rsk)
+cat("Returns in this case is",low_rsk_ret)
+pie(wt_low_rsk, labels = chosenAssets, main="Low Risk focued Portfolio 2019")
+#Low risk= low returns as well
+
+#Case 4 differently weighted return and risk calculation
+#The fitness function gives 70% weightage to  returns and 30% to  risk
+GA <- ga(type = "real-valued", fitness = function(x) {differently_weighted(x,meanDailyReturns, cov_assets)}, 
+         population = initial_population,
+         popSize = popSize, maxiter = 1000,
+         pcrossover = 0.7,
+         lower = rep(0,10),
+         upper = rep(1,10),
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+print(sum(GA@solution))
+wt_diff_wt <- as.vector(GA@solution)
+diff_wt_ret <- calcReturns (wt_diff_wt,meanDailyReturns)
+diff_wt_risk <- calcRisk (wt_diff_wt,cov_assets)
+cat("Portfolio that gives different weightage to returns and risk has returns of", diff_wt_ret)
+cat("Risk in this case is",diff_wt_risk)
+pie(wt_low_rsk, labels = chosenAssets, main="Different weighted Portfolio 2019")
+```
+Now we try to compare the performances of these portfolios at different extremes with the performance of a balanced portfolio
+```{r}
+labels <- c("Balanced GA","Max Return GA","Max Risk GA","Low Risk GA","Different weighted GA")
+colors <- c("red", "blue", "green", "purple", "orange")
+ggplot() +
+  geom_point(aes(x = c(GA_risk,max_rt_risk,max_rsk_rsk,low_rsk_rsk,diff_wt_risk), 
+                 y = c(GA_returns,max_rt_ret,max_rsk_rt,low_rsk_ret,diff_wt_ret),
+                 color = labels)) +
+  scale_color_manual(values = colors) +
+  labs(x = "Risk", y = "Returns",
+       title = "Risk vs. Return On Testing Data of 2020") +
+  scale_x_continuous(limits = c(-0.2, 0.4)) +
+  scale_y_continuous(limits = c(0.3, 0.8)) 
+```
+We can notice that lower risk means lower returns as well. The differently weighted portfolio has a marginally higher return when compared to a balanced GA. and the GAs which looked at maximising risk and maximising returns had similar risk and returns
+
+## Selecting assets using GA
+For this problem I have chosen 90 assets initially from NASDAQ-100 list. And as suggested in the lab exercise, I have used an efficient way to calculating and merging the daily returns and merging them in a dataframe. After that I have caluclated the Mean returns values and covariance of these assets. The timeframe considered is same as the initial training data (2019).
+```{r results = "hide"}
+nasdaq100 <- c("AAPL","MSFT","GOOG","GOOGL","AMZN","TSLA","NVDA","META","ASML","AVGO","PEP",
+               "COST","AZN","CSCO","TMUS","ADBE","NFLX","CMCSA","TXN","QCOM","AMD","HON","AMGN",
+               "SBUX","PDD","INTU","INTC","GILD","AMAT","ADP","BKNG","ADI","PYPL","MDLZ","ISRG",
+               "REGN","JD","VRTX","LRCX","MU","CSX","MRNA","CHTR","ATVI","MELI",
+               "KLAC","SNPS","MAR","MNST","ORLY","CDNS","PANW","KDP","NXPI","ADSK","KHC","MCHP",
+               "AEP","FTNT","CTAS","DXCM","BIIB","PAYX","IDXX","EXC","ROST","ODFL","MRVL","WDAY",
+               "LULU","XEL","WBD","CTSH","DLTR","BKR","WBA","EA","CSGP","ILMN","FAST",
+               "VRSK","EBAY","TEAM","PCAR","FANG",
+               "ANSS","ZS","SIRI","CPRT","WBD")
+
+Assets = lapply(nasdaq100, function(sym) {
+  dailyReturn(na.omit(getSymbols(sym, src="yahoo", from="2019-01-01", to="2019-12-31", auto.assign=FALSE)))
+})
+
+do.call(merge.xts, Assets)
+
+NasdaqRet <- data.frame(Assets)
+
+colnames(NasdaqRet) <- nasdaq100
+
+#Mean Daily Returns for each asset
+nsdqMeanDlyRet <-   apply(NasdaqRet,2,mean)
+cov_nsdq  <- cov(NasdaqRet) * 252
+```
+Next I have tried to calculate the top performing assets initially without using GA, but just sorting the 90 assets based on their performance and picking the top 10
+```{r}
+calcAnnual <-  function(x) {
+  prod(1+x)^252 - 1  
+}
+res <- unlist((lapply(nsdqMeanDlyRet, calcAnnual)))
+res <-  sort(res, decreasing = TRUE)
+print(res[1:10])
+```
+The results are satisfactory, however when we are dealing with a large sample size this approach is not always efficient and hence next I try to select assets using GA. To begin with, each individual will be represented as a binary vector of length 90 and it will have ten 1's in them indicating the 10 assets selected in that individual. I am generating my own initial population and feeding it to the GA function in order to maintain the constraint that the number of assets selected in an individual are always 10.
+```{r}
+init_population <- function(object) {
+  print("Here to get pop")
+  for (r in 1:popSize) {
+    #generate 10 random numbers between 1 - 90 with no duplicates
+    random_assets <-sample(1:length(Assets),10) 
+    empty_port <- rep(0,length(Assets)) #empty vector with just ones
+    chosen<- replace(empty_port,random_assets,1)#replace 10 positions randomly with 1
+    if (r == 1) {
+      initialPop <- rbind(chosen)
+    }
+    else
+    {
+      initialPop <- rbind(initialPop,chosen) #append each row to the matrix
+    }
+  }
+  return(initialPop) #return matrix of population to the GA function
+}
+```
+Next I have a function to check for constraint violation and penalizing the individual.
+```{r}
+check_numOnes <- function(x) {
+  if (sum(x) != 10 ) {
+    return(500)
+  }
+  else{
+    return(0)
+  }
+}
+```
+For my fitness function I have used the selection criteria as annualized returns.
+Annualaized return for each asset is calculated using formula: prod(1 + Ra)^(scale/n) - 1 where scale is the number of periods in a year, for days it is 252.
+```{r}
+nsdq_fitness <- function(chosen_assets,nsdqMeanDlyRet) {
+  annualized_returns <- prod(1+nsdqMeanDlyRet[chosen_assets==1])^252 - 1
+  return(annualized_returns - 100 * check_numOnes(chosen_assets))
+}
+```
+Next I am modifying the default mutation mechanism so that the mutation does not have an impact on the constraint
+```{r}
+gaControl("binary" = list(mutation= "gaperm_simMutation"))  #Inversion Mutation
+```
+Finally I have the GA and below are the assets chosen by using the genetic algorithm
+```{r}
+GA <- ga(type = "binary", fitness = function(x) {nsdq_fitness(x, nsdqMeanDlyRet)}, 
+         population = init_population, nBits=90,
+         popSize = popSize, maxiter = 100,
+         pcrossover = 0.7,
+         pmutation = 0.5,monitor = FALSE
+)
+#summary(GA)
+#plot(GA)
+print(sum(GA@solution))
+ga_chosen_bin <- GA@solution
+ga_chosen_assets <- nasdaq100[ga_chosen_bin==1]
+print(ga_chosen_assets)
+```
+
